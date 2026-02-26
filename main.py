@@ -12,6 +12,7 @@ import threading
 import pickle
 import time
 import argparse
+import os
 from typing import Optional, Dict
 
 class RelayServer:
@@ -28,6 +29,10 @@ class RelayServer:
         
         # Server state
         self.running = False
+        
+        # Logging control (to avoid spam when only one player connected)
+        self._warned_missing_player = set()
+        self._data_receive_count = {}
         
     def start(self):
         """Start the relay server."""
@@ -75,6 +80,11 @@ class RelayServer:
                 except:
                     pass
             
+            # Check for cloud platform environment variables (Railway, Render, etc.)
+            railway_domain = os.environ.get('RAILWAY_PUBLIC_DOMAIN')
+            render_domain = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+            heroku_domain = os.environ.get('DYNO')  # Heroku doesn't provide domain directly
+            
             # Try to get public IP (for cross-network connections)
             public_ip = None
             try:
@@ -86,12 +96,42 @@ class RelayServer:
             
             print(f"[Relay Server] =========================================")
             print(f"[Relay Server] Players should connect with:")
-            if server_ip:
-                print(f"[Relay Server]   For SAME network: python main.py --relay --relay-ip {server_ip} --relay-port {self.port}")
-            if public_ip and public_ip != server_ip:
-                print(f"[Relay Server]   For DIFFERENT network: python main.py --relay --relay-ip {public_ip} --relay-port {self.port}")
-            if not server_ip:
+            
+            # Priority: Cloud platform domain > Public IP > Local IP
+            connection_host = None
+            connection_port = self.port
+            
+            if railway_domain:
+                connection_host = railway_domain
+                print(f"[Relay Server]   RAILWAY DEPLOYMENT DETECTED")
+                print(f"[Relay Server]   ⚠️  IMPORTANT: You need to add a TCP Proxy in Railway!")
+                print(f"[Relay Server]   1. Go to Railway dashboard → Your Service → Settings")
+                print(f"[Relay Server]   2. Add a TCP Proxy (under Networking section)")
+                print(f"[Relay Server]   3. Railway will give you a TCP proxy hostname and port")
+                print(f"[Relay Server]   4. Use the TCP proxy hostname/port for connections:")
+                print(f"[Relay Server]      python main.py --relay --relay-ip <TCP_PROXY_HOSTNAME> --relay-port <TCP_PROXY_PORT>")
+                print(f"[Relay Server]   5. Example: python main.py --relay --relay-ip tcp-proxy.production.up.railway.app --relay-port 12345")
+                print(f"[Relay Server]   NOTE: Do NOT use the app domain ({railway_domain}) - use the TCP proxy!")
+            elif render_domain:
+                connection_host = render_domain
+                print(f"[Relay Server]   RENDER DEPLOYMENT DETECTED")
+                print(f"[Relay Server]   Use Render external hostname:")
+                print(f"[Relay Server]   python main.py --relay --relay-ip {render_domain} --relay-port {connection_port}")
+            elif public_ip and public_ip != server_ip:
+                connection_host = public_ip
+                print(f"[Relay Server]   For DIFFERENT network: python main.py --relay --relay-ip {public_ip} --relay-port {connection_port}")
+            elif server_ip:
+                connection_host = server_ip
+                print(f"[Relay Server]   For SAME network: python main.py --relay --relay-ip {server_ip} --relay-port {connection_port}")
+            
+            if not connection_host:
                 print(f"[Relay Server]   python main.py --relay --relay-ip <SERVER_IP> --relay-port {self.port}")
+            
+            print(f"[Relay Server] =========================================")
+            print(f"[Relay Server] IMPORTANT: For Railway deployments:")
+            print(f"[Relay Server]   - Add a TCP Proxy in Railway dashboard (Settings → Networking)")
+            print(f"[Relay Server]   - Use the TCP proxy hostname/port, NOT the app domain")
+            print(f"[Relay Server]   - Railway TCP proxy enables raw TCP socket connections")
             print(f"[Relay Server] =========================================")
             print(f"[Relay Server] NOTE: If ping fails but server is running, firewall may block ICMP.")
             print(f"[Relay Server] TCP connections (port {self.port}) may still work even if ping fails.")
@@ -165,18 +205,37 @@ class RelayServer:
                     break
                 
                 if not data:
-                    print(f"[Relay Server] Player {player_id} disconnected (no data received)")
+                    # Empty data means client closed connection
+                    print(f"[Relay Server] Player {player_id} disconnected (connection closed by client)")
                     break
                 
-                print(f"[Relay Server] Player {player_id} sent {len(data)} bytes")
+                # Only print first few data receives to avoid spam
+                if not hasattr(self, '_data_receive_count'):
+                    self._data_receive_count = {}
+                if player_id not in self._data_receive_count:
+                    self._data_receive_count[player_id] = 0
+                if self._data_receive_count[player_id] < 5:
+                    print(f"[Relay Server] Player {player_id} sent {len(data)} bytes")
+                    self._data_receive_count[player_id] += 1
                 
                 buffer += data
                 
                 # Parse messages (format: <size><pickled_data>)
                 while len(buffer) >= 4:
                     if expected_size is None:
-                        expected_size = int.from_bytes(buffer[:4], byteorder='big')
-                        buffer = buffer[4:]
+                        try:
+                            expected_size = int.from_bytes(buffer[:4], byteorder='big')
+                            if expected_size <= 0 or expected_size > 10 * 1024 * 1024:  # Sanity check: max 10MB
+                                print(f"[Relay Server] Invalid message size from player {player_id}: {expected_size}")
+                                buffer = buffer[4:]  # Skip this message
+                                expected_size = None
+                                continue
+                            buffer = buffer[4:]
+                        except Exception as e:
+                            print(f"[Relay Server] Error reading message size from player {player_id}: {e}")
+                            buffer = b""  # Clear buffer on error
+                            expected_size = None
+                            break
                     
                     if len(buffer) >= expected_size:
                         try:
@@ -189,7 +248,13 @@ class RelayServer:
                             
                         except Exception as e:
                             print(f"[Relay Server] Error parsing message from player {player_id}: {e}")
-                            buffer = buffer[expected_size:]
+                            import traceback
+                            traceback.print_exc()
+                            # Skip this message and continue
+                            if expected_size and expected_size <= len(buffer):
+                                buffer = buffer[expected_size:]
+                            else:
+                                buffer = b""
                             expected_size = None
                     else:
                         break  # Need more data
@@ -220,10 +285,17 @@ class RelayServer:
                     data = pickle.dumps(message)
                     size = len(data).to_bytes(4, byteorder='big')
                     target_socket.sendall(size + data)
+                    # Only print first few forwards to avoid spam
+                    if message.get("type") == "input" and message.get("frame", 0) < 5:
+                        print(f"[Relay Server] Forwarded message from Player {from_player} to Player {target_player}")
                 except Exception as e:
                     print(f"[Relay Server] Error forwarding to player {target_player}: {e}")
             else:
-                # Target player not connected yet, drop message
+                # Target player not connected yet, drop message (this is normal)
+                # Only print once to avoid spam when waiting for second player
+                if target_player not in self._warned_missing_player:
+                    print(f"[Relay Server] Player {target_player} not connected yet, waiting... (messages will be dropped until connected)")
+                    self._warned_missing_player.add(target_player)
                 pass
     
     def stop(self):
