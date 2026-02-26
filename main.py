@@ -176,6 +176,23 @@ class RelayServer:
                             self.clients[player_id] = (conn, addr, thread)
                             print(f"[Relay Server] Player {player_id} connected from {addr}")
                             print(f"[Relay Server] Connected players: {list(self.clients.keys())}")
+                            
+                            # Check if both players are now connected
+                            if len(self.clients) == 2:
+                                print(f"[Relay Server] Both players connected! Notifying clients...")
+                                # Notify both clients that the game can start
+                                for pid, (client_sock, _, _) in list(self.clients.items()):
+                                    try:
+                                        ready_message = {
+                                            "type": "both_players_ready",
+                                            "player_id": pid
+                                        }
+                                        data = pickle.dumps(ready_message)
+                                        size = len(data).to_bytes(4, byteorder='big')
+                                        client_sock.sendall(size + data)
+                                        print(f"[Relay Server] Sent 'both_players_ready' to Player {pid}")
+                                    except Exception as e:
+                                        print(f"[Relay Server] Error sending ready message to Player {pid}: {e}")
                         else:
                             # Both slots taken, reject connection
                             conn.close()
