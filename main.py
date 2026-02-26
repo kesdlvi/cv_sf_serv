@@ -153,6 +153,19 @@ class RelayServer:
                                 break
                         
                         if player_id is not None:
+                            # Send player ID assignment to client
+                            try:
+                                assignment_message = {
+                                    "type": "player_assigned",
+                                    "player_id": player_id
+                                }
+                                data = pickle.dumps(assignment_message)
+                                size = len(data).to_bytes(4, byteorder='big')
+                                conn.sendall(size + data)
+                                print(f"[Relay Server] Sent player ID {player_id} to client at {addr}")
+                            except Exception as e:
+                                print(f"[Relay Server] Error sending player ID: {e}")
+                            
                             # Start handler thread for this client
                             thread = threading.Thread(
                                 target=self._handle_client,
