@@ -139,14 +139,20 @@ class RelayServer:
             print(f"[Relay Server] Waiting for 2 players to connect...")
             
             # Accept connections
-            player_id = 1
-            while self.running and player_id <= 2:
+            while self.running:
                 try:
                     conn, addr = self.socket.accept()
                     conn.settimeout(30.0)  # Longer timeout to keep connection alive
                     
                     with self.clients_lock:
-                        if player_id not in self.clients:
+                        # Find first available slot (1 or 2)
+                        player_id = None
+                        for slot in [1, 2]:
+                            if slot not in self.clients:
+                                player_id = slot
+                                break
+                        
+                        if player_id is not None:
                             # Start handler thread for this client
                             thread = threading.Thread(
                                 target=self._handle_client,
@@ -156,18 +162,26 @@ class RelayServer:
                             thread.start()
                             self.clients[player_id] = (conn, addr, thread)
                             print(f"[Relay Server] Player {player_id} connected from {addr}")
-                            player_id += 1
+                            print(f"[Relay Server] Connected players: {list(self.clients.keys())}")
                         else:
+                            # Both slots taken, reject connection
                             conn.close()
-                            print(f"[Relay Server] Player {player_id} slot already taken")
+                            print(f"[Relay Server] Both player slots are taken, rejecting connection from {addr}")
                             
                 except Exception as e:
                     if self.running:
                         print(f"[Relay Server] Error accepting connection: {e}")
-                    break
+                        import traceback
+                        traceback.print_exc()
+                        # Don't break - keep accepting connections
+                        time.sleep(1)  # Wait a bit before retrying
+                    else:
+                        break  # Only break if server is stopping
                     
         except Exception as e:
             print(f"[Relay Server] Server error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.stop()
     
