@@ -103,7 +103,7 @@ class RelayServer:
             while self.running and player_id <= 2:
                 try:
                     conn, addr = self.socket.accept()
-                    conn.settimeout(0.1)  # Non-blocking with timeout
+                    conn.settimeout(30.0)  # Longer timeout to keep connection alive
                     
                     with self.clients_lock:
                         if player_id not in self.clients:
@@ -137,18 +137,38 @@ class RelayServer:
         expected_size = None
         
         try:
+            print(f"[Relay Server] Player {player_id} handler started, waiting for data...")
+            # Set a longer timeout to keep connection alive
+            conn.settimeout(30.0)
             while self.running:
                 try:
                     data = conn.recv(4096)
                 except socket.timeout:
+                    # Timeout is normal - connection is still alive, just no data yet
+                    # Check if connection is still valid
+                    try:
+                        # Try to peek at the socket to see if it's still connected
+                        conn.settimeout(0.1)
+                        test_data = conn.recv(1, socket.MSG_PEEK)
+                        conn.settimeout(30.0)
+                        if not test_data:
+                            print(f"[Relay Server] Player {player_id} connection closed (peek returned empty)")
+                            break
+                    except:
+                        print(f"[Relay Server] Player {player_id} connection error during timeout check")
+                        break
                     continue  # Normal timeout, keep looping
                 except Exception as e:
                     print(f"[Relay Server] Error receiving from player {player_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     break
                 
                 if not data:
-                    print(f"[Relay Server] Player {player_id} disconnected")
+                    print(f"[Relay Server] Player {player_id} disconnected (no data received)")
                     break
+                
+                print(f"[Relay Server] Player {player_id} sent {len(data)} bytes")
                 
                 buffer += data
                 
@@ -248,4 +268,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
